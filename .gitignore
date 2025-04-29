@@ -1,0 +1,4 @@
+*.exe
+/zt2cf
+/.local
+/dist
