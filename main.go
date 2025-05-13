@@ -16,19 +16,27 @@ import (
 )
 
 const (
+	version = "v0.1.0"
+)
+
+const (
 	zeroTierBaseURL = "https://my.zerotier.com/api/v1"
 )
 
 // --- Configuration Struct ---
 type Config struct {
-	ZeroTierToken     string
-	ZeroTierNetworkID string
-	CloudflareToken   string
-	CloudflareZoneID  string
-	TargetDomain      string
-	TargetPrefix      string
-	DryRun            bool
-	DeleteStale       bool // New flag to control stale record deletion
+	// zerotier token
+	ZtToken string
+	// zerotier network id
+	ZtNetwork string
+	// cloudflare token
+	CfToken string
+	// cloudflare DNS zone id
+	CfZone string
+	// cloudflare target domain, e.g. "example.com" or "z.example.com"
+	Domain      string
+	DryRun      bool
+	DeleteStale bool // New flag to control stale record deletion
 }
 
 // --- Structs for ZeroTier API Response ---
@@ -51,56 +59,40 @@ type ZeroTierMember struct {
 func loadConfig() (Config, error) {
 	var cfg Config
 
-	// Define flags
-	flag.StringVar(&cfg.ZeroTierToken, "zt-token", "", "ZeroTier Central API Token (env: ZEROTIER_TOKEN)")
-	flag.StringVar(&cfg.ZeroTierNetworkID, "network-id", "", "ZeroTier Network ID (env: ZEROTIER_NETWORK_ID)")
-	flag.StringVar(&cfg.CloudflareToken, "cf-token", "", "Cloudflare API Token (env: CLOUDFLARE_API_TOKEN)")
-	flag.StringVar(&cfg.CloudflareZoneID, "zone-id", "", "Cloudflare Zone ID (env: CLOUDFLARE_ZONE_ID)")
-	flag.StringVar(&cfg.TargetDomain, "domain", "", "Target domain (e.g., example.com) (env: CLOUDFLARE_TARGET_DOMAIN)")
-	flag.StringVar(&cfg.TargetPrefix, "prefix", "", "DNS record prefix (e.g., z for z.example.com) (env: CLOUDFLARE_TARGET_PREFIX)")
-	flag.BoolVar(&cfg.DryRun, "dry-run", false, "Enable dry run mode (log changes without applying)")
-	flag.BoolVar(&cfg.DeleteStale, "delete-stale", false, "Enable deletion of stale DNS records in Cloudflare") // New flag
+	cfg.ZtToken = os.Getenv("ZT_TOKEN")
+	cfg.ZtNetwork = os.Getenv("ZT_NETWORK")
+	cfg.CfToken = os.Getenv("CF_TOKEN")
+	cfg.CfZone = os.Getenv("CF_ZONE")
+	cfg.Domain = os.Getenv("DOMAIN")
 
+	// Define flags
+	flag.StringVar(&cfg.ZtToken, "zt-token", cfg.ZtToken, "ZeroTier Central API Token (env: ZT_TOKEN)")
+	flag.StringVar(&cfg.ZtNetwork, "zt-network", cfg.ZtNetwork, "ZeroTier Network ID (env: ZT_NETWORK)")
+	flag.StringVar(&cfg.CfToken, "cf-token", cfg.CfToken, "Cloudflare API Token (env: CF_TOKEN)")
+	flag.StringVar(&cfg.CfZone, "cf-zone", cfg.CfZone, "Cloudflare Zone ID (env: CF_ZONE)")
+	flag.StringVar(&cfg.Domain, "domain", cfg.Domain, "Target domain (e.g., example.com or z.example.com) (env: DOMAIN)")
+	flag.BoolVar(&cfg.DryRun, "dry-run", false, "Enable dry run mode (log changes without applying)")
+	flag.BoolVar(&cfg.DeleteStale, "delete-stale", false, "Enable deletion of stale DNS records in Cloudflare")
 	flag.Parse()
 
-	// Load from environment variables if flags are not set
-	if cfg.ZeroTierToken == "" {
-		cfg.ZeroTierToken = os.Getenv("ZEROTIER_TOKEN")
-	}
-	if cfg.ZeroTierNetworkID == "" {
-		cfg.ZeroTierNetworkID = os.Getenv("ZEROTIER_NETWORK_ID")
-	}
-	if cfg.CloudflareToken == "" {
-		cfg.CloudflareToken = os.Getenv("CLOUDFLARE_API_TOKEN")
-	}
-	if cfg.CloudflareZoneID == "" {
-		cfg.CloudflareZoneID = os.Getenv("CLOUDFLARE_ZONE_ID")
-	}
-	if cfg.TargetDomain == "" {
-		cfg.TargetDomain = os.Getenv("CLOUDFLARE_TARGET_DOMAIN")
-	}
-	if cfg.TargetPrefix == "" {
-		cfg.TargetPrefix = os.Getenv("CLOUDFLARE_TARGET_PREFIX")
-	}
-	// Boolean flags default to false, no need for env var fallback unless specifically desired
+	cfg.Domain = strings.TrimPrefix(cfg.Domain, ".")
 
 	// Validate required fields
-	if cfg.ZeroTierToken == "" || cfg.ZeroTierNetworkID == "" || cfg.CloudflareToken == "" || cfg.CloudflareZoneID == "" || cfg.TargetDomain == "" || cfg.TargetPrefix == "" {
-		return cfg, fmt.Errorf("missing required configuration (check flags -h or environment variables like ZEROTIER_TOKEN, ZEROTIER_NETWORK_ID, CLOUDFLARE_API_TOKEN, CLOUDFLARE_ZONE_ID, CLOUDFLARE_TARGET_DOMAIN, CLOUDFLARE_TARGET_PREFIX)")
+	if cfg.ZtToken == "" || cfg.ZtNetwork == "" || cfg.CfToken == "" || cfg.CfZone == "" || cfg.Domain == "" {
+		return cfg, fmt.Errorf("missing required configuration (check flags -h or environment variables like ZT_TOKEN, ZT_NETWORK, CF_TOKEN, CF_ZONE, DOMAIN)")
 	}
-
 	return cfg, nil
 }
 
 // getZeroTierMembers fetches members from the ZeroTier network
 func getZeroTierMembers(ctx context.Context, cfg Config) ([]ZeroTierMember, error) {
-	url := fmt.Sprintf("%s/network/%s/member", zeroTierBaseURL, cfg.ZeroTierNetworkID)
+	url := fmt.Sprintf("%s/network/%s/member", zeroTierBaseURL, cfg.ZtNetwork)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create ZeroTier request: %w", err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+cfg.ZeroTierToken)
+	req.Header.Set("Authorization", "Bearer "+cfg.ZtToken)
 	req.Header.Set("Accept", "application/json")
 
 	client := &http.Client{Timeout: 15 * time.Second}
@@ -120,19 +112,19 @@ func getZeroTierMembers(ctx context.Context, cfg Config) ([]ZeroTierMember, erro
 		return nil, fmt.Errorf("failed to decode ZeroTier members JSON: %w", err)
 	}
 
-	log.Printf("Fetched %d members from ZeroTier network %s", len(members), cfg.ZeroTierNetworkID)
+	log.Printf("Fetched %d members from ZeroTier network %s", len(members), cfg.ZtNetwork)
 	return members, nil
 }
 
 // getCloudflareRecords fetches existing A records for the target subdomain
 func getCloudflareRecords(ctx context.Context, cfAPI *cloudflare.API, cfg Config) (map[string]cloudflare.DNSRecord, error) {
-	recs, _, err := cfAPI.ListDNSRecords(ctx, cloudflare.ZoneIdentifier(cfg.CloudflareZoneID), cloudflare.ListDNSRecordsParams{Type: "A"})
+	recs, _, err := cfAPI.ListDNSRecords(ctx, cloudflare.ZoneIdentifier(cfg.CfZone), cloudflare.ListDNSRecordsParams{Type: "A"})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list Cloudflare DNS records: %w", err)
 	}
 
 	existingRecords := make(map[string]cloudflare.DNSRecord)
-	targetSuffix := fmt.Sprintf(".%s.%s", cfg.TargetPrefix, cfg.TargetDomain)
+	targetSuffix := "." + cfg.Domain
 
 	for _, r := range recs {
 		if strings.HasSuffix(r.Name, targetSuffix) {
@@ -167,6 +159,7 @@ func isValidDNSLabel(name string) bool {
 // --- Main Sync Logic ---
 
 func main() {
+	log.Printf("zt2cf %s", version)
 	log.Println("Starting ZeroTier -> Cloudflare DNS Sync...")
 
 	cfg, err := loadConfig()
@@ -192,7 +185,7 @@ func main() {
 	ctx := context.Background()
 
 	// Initialize Cloudflare API client
-	cfAPI, err := cloudflare.NewWithAPIToken(cfg.CloudflareToken)
+	cfAPI, err := cloudflare.NewWithAPIToken(cfg.CfToken)
 	if err != nil {
 		log.Fatalf("Error creating Cloudflare API client: %v", err)
 	}
@@ -238,7 +231,7 @@ func main() {
 			}
 		}
 
-		targetFQDN := fmt.Sprintf("%s.%s.%s", memberName, cfg.TargetPrefix, cfg.TargetDomain)
+		targetFQDN := fmt.Sprintf("%s.%s", memberName, cfg.Domain)
 		targetFQDNLower := strings.ToLower(targetFQDN)
 
 		log.Printf("Processing Member: Name='%s', NodeID=%s, Target FQDN='%s', IP=%s", member.Name, member.NodeID, targetFQDN, managedIP)
@@ -251,7 +244,7 @@ func main() {
 					updateParams := cloudflare.UpdateDNSRecordParams{
 						ID: existingRec.ID, Type: "A", Name: targetFQDN, Content: managedIP, TTL: existingRec.TTL, Proxied: existingRec.Proxied,
 					}
-					_, err = cfAPI.UpdateDNSRecord(ctx, cloudflare.ZoneIdentifier(cfg.CloudflareZoneID), updateParams)
+					_, err = cfAPI.UpdateDNSRecord(ctx, cloudflare.ZoneIdentifier(cfg.CfZone), updateParams)
 					if err != nil {
 						log.Printf("ERROR updating DNS record %s: %v", targetFQDN, err)
 					} else {
@@ -267,7 +260,7 @@ func main() {
 				createParams := cloudflare.CreateDNSRecordParams{
 					Type: "A", Name: targetFQDN, Content: managedIP, TTL: 1, Proxied: cloudflare.BoolPtr(false),
 				}
-				_, err = cfAPI.CreateDNSRecord(ctx, cloudflare.ZoneIdentifier(cfg.CloudflareZoneID), createParams)
+				_, err = cfAPI.CreateDNSRecord(ctx, cloudflare.ZoneIdentifier(cfg.CfZone), createParams)
 				if err != nil {
 					if strings.Contains(err.Error(), "The record already exists") {
 						log.Printf("WARN: Record %s already exists (likely race condition or previous error), skipping creation.", targetFQDN)
@@ -291,7 +284,7 @@ func main() {
 				log.Printf("%sDeletion required for stale record %s (ID: %s)", dryRunPrefix, rec.Name, rec.ID)
 				deletedCount++
 				if !cfg.DryRun {
-					err := cfAPI.DeleteDNSRecord(ctx, cloudflare.ZoneIdentifier(cfg.CloudflareZoneID), rec.ID)
+					err := cfAPI.DeleteDNSRecord(ctx, cloudflare.ZoneIdentifier(cfg.CfZone), rec.ID)
 					if err != nil {
 						log.Printf("ERROR deleting stale DNS record %s: %v", rec.Name, err)
 					} else {
